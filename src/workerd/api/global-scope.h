@@ -497,25 +497,9 @@ enum class PreShutdownReason : uint8_t {
   INACTIVE,
   // The object is being reset because its code was updated.
   CODE_UPDATED,
-};
-
-// The result of attempting to run a Durable Object's preShutdown() lifecycle handler. Used for
-// logging and metrics; the shutdown proceeds regardless of the outcome.
-enum class PreShutdownOutcome : uint8_t {
-  // The hook was not applicable: the compatibility flag is off, the class instance was never
-  // constructed, or the class does not define a preShutdown() method.
-  NO_HANDLER,
-  // The handler ran and its returned promise resolved within the time budget.
-  COMPLETED,
-  // The handler threw, its returned promise rejected, or it was cut short by an error
-  // attributable to the user (e.g. it hard-aborted its own actor).
-  THREW,
-  // The handler did not settle within the time budget. Unlike the alarm timeout, this does not
-  // abort the IoContext; the runtime merely stops waiting.
-  TIMED_OUT,
-  // The handler could not be run at all, or was interrupted by an internal (non-user) failure,
-  // e.g. because the IoContext was aborted concurrently.
-  FAILED,
+  // The object is being shut down for a reason outside the user's control, e.g. a runtime
+  // restart or machine maintenance.
+  SYSTEM,
 };
 
 // PreShutdownInfo is a jsg::Object passed to a Durable Object's preShutdown() lifecycle handler
@@ -530,6 +514,8 @@ class PreShutdownInfo final: public jsg::Object {
         return "inactive"_kj;
       case PreShutdownReason::CODE_UPDATED:
         return "codeUpdated"_kj;
+      case PreShutdownReason::SYSTEM:
+        return "system"_kj;
     }
     KJ_UNREACHABLE;
   }
@@ -541,7 +527,7 @@ class PreShutdownInfo final: public jsg::Object {
     // handlers must tolerate reason strings they don't recognize. The known literals are still
     // listed so editors can autocomplete them.
     JSG_TS_OVERRIDE({
-      readonly reason: "inactive" | "codeUpdated" | (string & {});
+      readonly reason: "inactive" | "codeUpdated" | "system" | (string & {});
     });
   }
 
@@ -791,10 +777,7 @@ class ServiceWorkerGlobalScope: public WorkerGlobalScope {
   // runtime stops waiting, but JS the handler already started (and storage writes it already
   // issued) may still complete until teardown. Handler exceptions are logged to the user's
   // observability and reported in the outcome; this method never throws due to handler failure.
-  //
-  // Returns NO_HANDLER without side effects (and without log noise) if the exported handler does
-  // not define preShutdown or the `durable_object_pre_shutdown` compatibility flag is disabled.
-  kj::Promise<PreShutdownOutcome> runPreShutdown(PreShutdownReason reason,
+  kj::Promise<EventOutcome> runPreShutdown(PreShutdownReason reason,
       kj::Duration timeout,
       Worker::Lock& lock,
       kj::Maybe<ExportedHandler&> exportedHandler);

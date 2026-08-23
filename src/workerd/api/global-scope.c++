@@ -773,33 +773,29 @@ kj::Promise<WorkerInterface::AlarmResult> ServiceWorkerGlobalScope::runAlarm(kj:
   KJ_UNREACHABLE;
 }
 
-kj::Promise<PreShutdownOutcome> ServiceWorkerGlobalScope::runPreShutdown(PreShutdownReason reason,
+kj::Promise<EventOutcome> ServiceWorkerGlobalScope::runPreShutdown(PreShutdownReason reason,
     kj::Duration timeout,
     Worker::Lock& lock,
     kj::Maybe<ExportedHandler&> exportedHandler) {
   auto& context = IoContext::current();
 
   if (!FeatureFlags::get(lock).getDurableObjectPreShutdown()) {
-    // Handler present but compat flag off: not invoked.
-    return PreShutdownOutcome::NO_HANDLER;
+    return EventOutcome::CANCELED;
   }
 
-  auto& handler = KJ_UNWRAP_OR(exportedHandler, return PreShutdownOutcome::NO_HANDLER);
-  auto& preShutdown = KJ_UNWRAP_OR(handler.preShutdown, {
-    // A class without the method must incur no overhead and no log noise.
-    return PreShutdownOutcome::NO_HANDLER;
-  });
+  auto& handler = KJ_UNWRAP_OR(exportedHandler, return EventOutcome::CANCELED);
+  auto& preShutdown = KJ_UNWRAP_OR(handler.preShutdown, return EventOutcome::CANCELED);
 
   return context
       .run([&preShutdown, reason, timeout](
-               Worker::Lock& lock, IoContext& context) mutable -> kj::Promise<PreShutdownOutcome> {
+               Worker::Lock& lock, IoContext& context) mutable -> kj::Promise<EventOutcome> {
     // The hook deliberately runs with no per-request AsyncLocalStorage context: per-request ALS
     // values (e.g. application tracing) do not survive into the hook.
     jsg::AsyncContextFrame::Scope asyncScope(lock, kj::none);
     jsg::Lock& js = lock;
 
     auto timeoutPromise =
-        context.afterLimitTimeout(timeout).then([]() -> kj::Promise<PreShutdownOutcome> {
+        context.afterLimitTimeout(timeout).then([]() -> kj::Promise<EventOutcome> {
       // Unlike the alarm timeout, we do NOT abort the IoContext: teardown is already committed
       // and proceeding, and the caller still drains storage writes the handler managed to issue.
       // We just stop waiting for the handler. The abandoned handler continuation may keep
@@ -808,23 +804,20 @@ kj::Promise<PreShutdownOutcome> ServiceWorkerGlobalScope::runPreShutdown(PreShut
       // remains attached to the handler's promise throughout, so a late rejection doesn't
       // become unhandled-rejection noise.
       //
-      // We intentionally don't take the isolate lock here to emit a user-visible warning: a
-      // handler spinning the CPU would delay teardown past the budget. Timeouts are surfaced
-      // via the outcome (metrics) instead.
-      //
-      // Note that this timeout is not preemptive: like any timer, it only fires once the isolate
-      // yields to the event loop, so it bounds handlers that await too long, not handlers that
-      // spin the CPU. CPU-bound handlers are bounded by the embedder's CPU enforcement instead;
-      // see LimitEnforcer::getPreShutdownLimit().
+      // Like any timer, this timeout only fires once the isolate yields to the event loop, so it
+      // bounds handlers that await too long, not handlers that spin the CPU; the latter are
+      // bounded by the embedder's CPU enforcement (see LimitEnforcer::getPreShutdownLimit()).
+      // We also don't take the isolate lock to emit a user-visible warning, since a CPU-bound
+      // handler would then delay teardown past the budget.
       LOG_NOSENTRY(WARNING, "preShutdown() handler exceeded its allowed execution time");
-      return PreShutdownOutcome::TIMED_OUT;
+      return EventOutcome::EXCEEDED_WALL_TIME;
     });
 
     return preShutdown(lock, js.alloc<PreShutdownInfo>(reason))
-        .then([]() -> kj::Promise<PreShutdownOutcome> {
-      return PreShutdownOutcome::COMPLETED;
+        .then([]() -> kj::Promise<EventOutcome> {
+      return EventOutcome::OK;
     }).exclusiveJoin(kj::mv(timeoutPromise));
-  }).catch_([&context](kj::Exception&& e) -> PreShutdownOutcome {
+  }).catch_([&context](kj::Exception&& e) -> EventOutcome {
     if (jsg::isTunneledException(e.getDescription()) ||
         e.getDetail(jsg::EXCEPTION_IS_USER_ERROR) != kj::none) {
       // The handler threw or rejected (or otherwise failed with an error attributable to the
@@ -833,14 +826,14 @@ kj::Promise<PreShutdownOutcome> ServiceWorkerGlobalScope::runPreShutdown(PreShut
       // proceed with teardown. The shutdown keeps its original classification (e.g.
       // broken.dropped), not an error-class reset.
       context.logUncaughtExceptionAsync(UncaughtExceptionSource::PRE_SHUTDOWN_HANDLER, kj::mv(e));
-      return PreShutdownOutcome::THREW;
+      return EventOutcome::EXCEPTION;
     }
     // An internal failure interrupted the handler, e.g. the IoContext was aborted mid-hook by
     // a brokenness path racing with this shutdown. That is not the handler's exception, so
     // don't report it into the user's observability as one; classify it like the
-    // couldn't-run-at-all case (see Worker::Actor::runPreShutdownImpl()).
+    // couldn't-run-at-all case (see Worker::Actor::runPreShutdown()).
     LOG_NOSENTRY(WARNING, "preShutdown() handler was interrupted by a non-user error", e);
-    return PreShutdownOutcome::FAILED;
+    return EventOutcome::CANCELED;
   });
 }
 

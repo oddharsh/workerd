@@ -4422,23 +4422,7 @@ bool Worker::Actor::hasPreShutdownHandler() {
   return false;
 }
 
-kj::Maybe<kj::Promise<api::PreShutdownOutcome>> Worker::Actor::runPreShutdown(
-    api::PreShutdownReason reason,
-    kj::Rc<IoChannelFactory> ioChannelFactory,
-    kj::Own<RequestObserver> observer,
-    kj::Maybe<kj::Own<BaseTracer>> workerTracer) {
-  // Bail out synchronously if there is no handler, so that such actors' shutdown paths don't
-  // suspend at all.
-  if (!hasPreShutdownHandler()) {
-    return kj::none;
-  }
-
-  return runPreShutdownImpl(
-      reason, kj::mv(ioChannelFactory), kj::mv(observer), kj::mv(workerTracer));
-}
-
-kj::Promise<api::PreShutdownOutcome> Worker::Actor::runPreShutdownImpl(
-    api::PreShutdownReason reason,
+kj::Promise<EventOutcome> Worker::Actor::runPreShutdown(api::PreShutdownReason reason,
     kj::Rc<IoChannelFactory> ioChannelFactory,
     kj::Own<RequestObserver> observer,
     kj::Maybe<kj::Own<BaseTracer>> workerTracer) {
@@ -4447,17 +4431,20 @@ kj::Promise<api::PreShutdownOutcome> Worker::Actor::runPreShutdownImpl(
   // reference while we are suspended, and this coroutine must not run against a destroyed
   // actor. This is deliberately a plain kj::addRef() rather than Actor::addRef(): the latter
   // creates a RequestTracker::ActiveRequest, whose active() callback would cancel the very
-  // shutdown that triggered this hook. The pin is released when the coroutine completes, before
-  // the caller's continuation resumes, so callers' isShared() re-checks are not affected. Note
-  // that an abort still cuts the hook short (the IoContext rejects, yielding outcome FAILED);
-  // the pin only guarantees that doing so is memory-safe.
+  // shutdown that triggered this hook. Note that an abort still cuts the hook short (the
+  // IoContext rejects, yielding outcome CANCELED); the pin only guarantees that doing so is
+  // memory-safe.
   auto self = kj::addRef(*this);
 
-  // A constructed class instance implies an IoContext was created; if it's already gone, the
-  // actor is past the point of running JS.
+  // hasPreShutdownHandler() returning true implies the class instance was constructed, which
+  // implies an IoContext was created. If the IoContext is gone anyway, then the actor was
+  // already hard-shut-down before we were invoked -- shutdown() destroys the IoContext once the
+  // last IncomingRequest is gone -- e.g. an abort or brokenness path raced with the embedder's
+  // planned-eviction path. The actor is past the point of running JS, so report the hook as
+  // canceled, like any other case where it could not run.
   IoContext& context = KJ_UNWRAP_OR(getIoContext(), {
-    impl->metrics->preShutdownFinished(api::PreShutdownOutcome::FAILED);
-    co_return api::PreShutdownOutcome::FAILED;
+    impl->metrics->preShutdownFinished(EventOutcome::CANCELED);
+    co_return EventOutcome::CANCELED;
   });
 
   // Set up a lightweight IncomingRequest so that the IoContext has a current request while the
@@ -4468,21 +4455,20 @@ kj::Promise<api::PreShutdownOutcome> Worker::Actor::runPreShutdownImpl(
           kj::mv(observer), kj::mv(workerTracer), kj::none /* maybeTriggerInvocationSpan */);
   incomingRequest->delivered();
 
-  api::PreShutdownOutcome outcome;
-  try {
+  EventOutcome outcome;
+  KJ_TRY {
     outcome = co_await context.run(
-        [reason](Worker::Lock& lock, IoContext& context) -> kj::Promise<api::PreShutdownOutcome> {
+        [reason](Worker::Lock& lock, IoContext& context) -> kj::Promise<EventOutcome> {
       auto timeout = context.getLimitEnforcer().getPreShutdownLimit();
       auto handler = KJ_ASSERT_NONNULL(context.getActor()).getHandler();
       return lock.getGlobalScope().runPreShutdown(reason, timeout, lock, handler);
     });
-  } catch (...) {
+  } KJ_CATCH(exception) {
     // We couldn't run the handler at all, e.g. the IoContext was aborted concurrently (say, by
     // resource-limit condemnation racing with the shutdown path). Teardown proceeds; the hook is
     // best-effort.
-    auto exception = kj::getCaughtExceptionAsKj();
     LOG_NOSENTRY(WARNING, "failed to deliver preShutdown() to actor", exception);
-    outcome = api::PreShutdownOutcome::FAILED;
+    outcome = EventOutcome::CANCELED;
   }
 
   // Regardless of the handler's outcome (including timeout), drain any storage writes it managed
@@ -4491,7 +4477,9 @@ kj::Promise<api::PreShutdownOutcome> Worker::Actor::runPreShutdownImpl(
   // output gate; a broken gate rejects this promise, in which case teardown just proceeds.
   KJ_IF_SOME(persistent, getPersistent()) {
     KJ_IF_SOME(flush, persistent.onNoPendingFlush(SpanParent(nullptr))) {
-      co_await flush.catch_([](kj::Exception&&) {});
+      KJ_TRY {
+        co_await flush;
+      } KJ_CATCH(_) {}
     }
   }
 

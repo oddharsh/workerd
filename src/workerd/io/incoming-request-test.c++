@@ -126,8 +126,8 @@ KJ_TEST("IoContext::IncomingRequest::drain() releases a superseded (non-front) r
 // abandonTasksForActorShutdown() is what the preShutdown() hook uses instead of drain(): it
 // must cancel leftover I/O while the request is still installed, so nothing resumes on an
 // IoContext with no current request (that path Sentry-reports via taskFailed). When a second
-// IncomingRequest is already live -- workerd's local-dev racing-request revival -- leftover
-// work belongs to that request and must not be canceled.
+// IncomingRequest is already live -- e.g. an embedder delivering the hook to an actor that is
+// still serving requests -- leftover work may belong to that request and must not be canceled.
 KJ_TEST("abandonTasksForActorShutdown() cancels leftover work only as the last request") {
   TestFixture fixture({.actorId = Worker::Actor::Id(kj::str("abandon-test"))});
 

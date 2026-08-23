@@ -107,9 +107,8 @@ class DurableObject final: public Fetcher {
     JSG_READONLY_INSTANCE_PROPERTY(name, getName);
 
     // The JSG_TS_OVERRIDE renames this resource type to DurableObjectStub, and makes DurableObject
-    // the interface implemented by users' Durable Object classes. `preShutdown` is only reserved
-    // (and invoked by the runtime) when the `durable_object_pre_shutdown` compatibility flag is
-    // enabled, so it is only excluded from the stub's RPC surface under that flag.
+    // the interface implemented by users' Durable Object classes. `preShutdown` only exists (and
+    // is excluded from the stub's RPC surface) under the `durable_object_pre_shutdown` flag.
     if (flags.getDurableObjectPreShutdown()) {
       JSG_TS_DEFINE(interface DurableObject {
         fetch(request: Request): Response | Promise<Response>;

@@ -589,7 +589,7 @@ interface AlarmInvocationInfo {
   readonly scheduledTime: number;
 }
 interface PreShutdownInfo {
-  readonly reason: "inactive" | "codeUpdated" | (string & {});
+  readonly reason: "inactive" | "codeUpdated" | "system" | (string & {});
 }
 interface Cloudflare {
   readonly compatibilityFlags: Record<string, boolean>;

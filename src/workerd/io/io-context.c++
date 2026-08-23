@@ -372,22 +372,20 @@ void IoContext::IncomingRequest::abandonTasksForActorShutdown() {
   // Cancel all pending background work now, while this request is still installed: once it is
   // destroyed the IoContext has no current request, and any task that resumed in that state
   // would fail on getCurrentIncomingRequest() before ever reaching JS -- for awaitIo
-  // continuations, noisily, via taskFailed(). Everything canceled here was spawned by the
-  // teardown-sequence event's handler (the actor was quiescent before the event, or it would
-  // not be shutting down), and the imminent actor teardown would cancel it moments later
-  // anyway.
+  // continuations, noisily, via taskFailed(). Everything canceled here is work the imminent
+  // actor teardown would cancel moments later anyway (whether it was spawned by the
+  // teardown-sequence event's handler or left over from earlier events).
   //
   // This mirrors the destructor's aborted-context cleanup above, and must likewise run while
   // this request is still installed (canceled work may have spans attached that access the
   // current request's timer). It is safe to cancel from here for the same reason it is safe
-  // there: the caller (Worker::Actor::runPreShutdownImpl()) is not itself a task in any of
-  // these sets, so this is not a self-cancellation.
+  // there: the caller (Worker::Actor::runPreShutdown()) is not itself a task in any of these
+  // sets, so this is not a self-cancellation.
   //
-  // If another IncomingRequest is active -- workerd's local-dev semantics deliver a racing
-  // request to the still-live actor while the hook runs, calling the eviction off -- then that
-  // request's pending work must not be canceled, and the hazard this cancellation guards
-  // against doesn't exist either: the IoContext still has a current request once this one is
-  // destroyed.
+  // If another IncomingRequest is live -- e.g. an embedder delivers the teardown-sequence event
+  // to an actor that is still serving requests -- then those requests' pending work must not be
+  // canceled out from under them, and the hazard this cancellation guards against doesn't exist
+  // either: the IoContext still has a current request once this one is destroyed.
   if (context->incomingRequests.size() == 1) {
     context->timeoutManager->cancelAll();
     context->tasks.clear();

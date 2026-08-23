@@ -81,13 +81,6 @@ export class RacingHookObject extends DurableObject {
     return ++this.#bumps;
   }
 
-  // Increments, then stays in flight well past the end of the hook's stall.
-  async slowBump() {
-    ++this.#bumps;
-    await scheduler.wait(1000);
-    return this.#bumps;
-  }
-
   async preShutdown() {
     globalThis.racingHookStarted = true;
     await scheduler.wait(500);
@@ -208,10 +201,9 @@ export default {
       assert.strictEqual(await stub.getAlarmRan(), true);
     }
 
-    // A request that arrives while the hook is running (on the test-eviction path) revives the
-    // actor: the eviction is called off and the request is served by the same instance. This is
-    // the local-dev divergence from production, where destruction is committed once the hook
-    // starts; here, reviving the actor is the friendlier behavior for the racing request.
+    // Destruction is committed once the hook starts, matching production: a request that
+    // arrives while the hook is running does not revive the doomed actor (nor cancel the
+    // eviction); it waits for the teardown to settle and is then served by a fresh instance.
     {
       const stub = env.RACING_HOOK.get(env.RACING_HOOK.idFromName('a'));
       assert.strictEqual(await stub.bump(), 1);
@@ -220,15 +212,11 @@ export default {
       while (!globalThis.racingHookStarted) {
         await scheduler.wait(10);
       }
-      // The hook is now stalling. Get a request in flight that outlives the hook, so the actor
-      // still has an active request when the eviction path re-checks after the hook completes.
-      // It must be served by the same instance (bumps continue from 1), not torn down under a
-      // live request.
-      assert.strictEqual(await stub.slowBump(), 2);
-      // Once the actor goes idle again, the eviction retries (running the hook a second time)
-      // and succeeds.
+      // The hook is now stalling. A request sent mid-hook must be served by the successor
+      // instance (whose bump counter starts over), not by the instance being torn down.
+      const racingBump = stub.bump();
       await evictPromise;
-      assert.strictEqual(await stub.bump(), 1);
+      assert.strictEqual(await racingBump, 1);
     }
 
     // A worker without the compat flag: handler present but never invoked.

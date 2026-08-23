@@ -49,7 +49,6 @@ class DurableObjectStorage;
 class ServiceWorkerGlobalScope;
 struct ExportedHandler;
 enum class PreShutdownReason : uint8_t;
-enum class PreShutdownOutcome : uint8_t;
 struct CryptoAlgorithm;
 struct QueueExportedHandler;
 class WebSocket;
@@ -883,16 +882,14 @@ class Worker::Actor final: public kj::Refcounted {
 
     // Runs `actor`'s preShutdown() lifecycle hook by supplying the embedder's request
     // infrastructure (IoChannelFactory, RequestObserver, tracer) to
-    // Worker::Actor::runPreShutdown(). The loopback is a natural home for this because, like
-    // hibernatable WebSocket events, the hook must be deliverable when no inbound request
-    // exists, and the loopback is the object that captures whatever embedder context that
-    // requires. `actor` is passed explicitly (rather than the loopback remembering it) because
-    // the loopback can outlive the Worker::Actor.
+    // Worker::Actor::runPreShutdown(). This lives on the loopback because, like hibernatable
+    // WebSocket events, the hook must be deliverable when no inbound request exists. `actor` is
+    // passed explicitly because the loopback can outlive the Worker::Actor.
     //
     // Returns kj::none if the actor has no applicable handler or if this embedder does not
     // deliver the hook through the loopback (workerd's local server triggers it through its own
     // service objects instead; see Server::ActorClass::runPreShutdown()).
-    virtual kj::Maybe<kj::Promise<api::PreShutdownOutcome>> runPreShutdown(
+    virtual kj::Maybe<kj::Promise<EventOutcome>> runPreShutdown(
         Worker::Actor& actor, api::PreShutdownReason reason) {
       return kj::none;
     }
@@ -1087,12 +1084,9 @@ class Worker::Actor final: public kj::Refcounted {
   // storage-healthy shutdown paths, *before* calling shutdown(). Today only idle eviction does
   // so; further planned reasons (e.g. code-update resets) are expected to be added.
   //
-  // Returns kj::none (synchronously, with no side effects) if the actor's compatibility flags
-  // don't enable the hook, the class instance was never constructed, or the class doesn't define
-  // a preShutdown() method. Returning kj::none rather than an immediately-ready promise matters:
-  // it lets callers skip suspending entirely, so shutdown paths of actors without the hook keep
-  // exactly their prior timing. (Even a ready promise costs event-loop turns to await, widening
-  // the window in which a racing request can cancel an in-flight eviction.)
+  // Callers must check hasPreShutdownHandler() first and skip the call (synchronously, without
+  // suspending) when it returns false, so that shutdown paths of actors without the hook keep
+  // exactly their prior timing. (Even a ready promise costs event-loop turns to await.)
   //
   // This deliberately does not call addRef(): taking a normal strong reference would create a
   // RequestTracker::ActiveRequest, and the resulting active() callback would cancel the very
@@ -1101,24 +1095,18 @@ class Worker::Actor final: public kj::Refcounted {
   // path) before the promise resolves.
   //
   // The returned promise never rejects; failures are reported through the outcome (and logged).
-  kj::Maybe<kj::Promise<api::PreShutdownOutcome>> runPreShutdown(api::PreShutdownReason reason,
+  kj::Promise<EventOutcome> runPreShutdown(api::PreShutdownReason reason,
       kj::Rc<IoChannelFactory> ioChannelFactory,
       kj::Own<RequestObserver> observer,
       kj::Maybe<kj::Own<BaseTracer>> workerTracer);
 
-  // Whether the actor currently has a preShutdown() lifecycle handler that runPreShutdown()
-  // would run: the compat flag is on, the class instance was constructed, and the class defines
-  // the method. Useful for embedders that want to count shutdowns which skip a defined handler
-  // (e.g. because hook delivery is disabled). Like runPreShutdown(), this may only be called
-  // when the actor is quiescent, since it reads state that running requests mutate.
+  // Whether the actor currently has a preShutdown() lifecycle handler for runPreShutdown() to
+  // run: the compat flag is on, the class instance was constructed, and the class defines the
+  // method. May only be called when the actor is quiescent, since it reads state that running
+  // requests mutate.
   bool hasPreShutdownHandler();
 
  private:
-  kj::Promise<api::PreShutdownOutcome> runPreShutdownImpl(api::PreShutdownReason reason,
-      kj::Rc<IoChannelFactory> ioChannelFactory,
-      kj::Own<RequestObserver> observer,
-      kj::Maybe<kj::Own<BaseTracer>> workerTracer);
-
   kj::Promise<WorkerInterface::ScheduleAlarmResult> handleAlarm(kj::Date scheduledTime);
 
   kj::Own<const Worker> worker;

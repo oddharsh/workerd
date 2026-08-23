@@ -7,6 +7,7 @@
 // e.g. to collect logs and metrics.
 
 #include <workerd/io/features.capnp.h>
+#include <workerd/io/outcome.capnp.h>
 #include <workerd/io/trace.h>
 #include <workerd/jsg/observer.h>
 #include <workerd/util/sqlite.h>
@@ -26,10 +27,6 @@ WD_STRONG_BOOL(SubrequestBodyRewindable);
 class WorkerInterface;
 class LimitEnforcer;
 class TimerChannel;
-
-namespace api {
-enum class PreShutdownOutcome : uint8_t;
-}  // namespace api
 
 class WebSocketObserver: public kj::Refcounted {
  public:
@@ -329,9 +326,9 @@ class ActorObserver: public kj::Refcounted, public SqliteObserver {
   virtual void constructorCompleted() {}
 
   // Called when an attempt to run the actor's preShutdown() lifecycle handler has finished, with
-  // the given outcome. Not called for shutdowns that skip the hook synchronously because the
-  // actor has no applicable handler (see Worker::Actor::runPreShutdown()).
-  virtual void preShutdownFinished(api::PreShutdownOutcome outcome) {}
+  // the given outcome. Not called for shutdowns that skip the hook because the actor has no
+  // applicable handler (see Worker::Actor::runPreShutdown()).
+  virtual void preShutdownFinished(EventOutcome outcome) {}
 
   virtual void webSocketAccepted() {}
   virtual void webSocketClosed() {}
