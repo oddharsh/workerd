@@ -125,38 +125,46 @@ KJ_TEST("IoContext::IncomingRequest::drain() releases a superseded (non-front) r
 
 // abandonTasksForActorShutdown() is what the preShutdown() hook uses instead of drain(): it
 // must cancel leftover I/O while the request is still installed, so nothing resumes on an
-// IoContext with no current request (that path Sentry-reports via taskFailed). When a second
-// IncomingRequest is already live -- e.g. an embedder delivering the hook to an actor that is
-// still serving requests -- leftover work may belong to that request and must not be canceled.
-KJ_TEST("abandonTasksForActorShutdown() cancels leftover work only as the last request") {
+// IoContext with no current request (that path Sentry-reports via taskFailed). The end of the
+// hook means no more code may run in the actor, so this includes work belonging to other,
+// still-live IncomingRequests (an embedder may deliver the hook to an actor that is still
+// serving requests): those requests must not be allowed to finish.
+KJ_TEST("abandonTasksForActorShutdown() cancels leftover work of all requests") {
   TestFixture fixture({.actorId = Worker::Actor::Id(kj::str("abandon-test"))});
 
   auto context = fixture.newIoContext();
   auto request = fixture.newIncomingRequest(*context);
 
-  bool lastRequestCanceled = false;
-  context->addWaitUntil(kj::Promise<void>(kj::NEVER_DONE).attach(kj::defer([&lastRequestCanceled]() {
-    lastRequestCanceled = true;
-  })));
+  bool lastRequestWaitUntilCanceled = false;
+  context->addWaitUntil(kj::Promise<void>(kj::NEVER_DONE)
+          .attach(kj::defer(
+              [&lastRequestWaitUntilCanceled]() { lastRequestWaitUntilCanceled = true; })));
+  bool lastRequestTaskCanceled = false;
+  context->addTask(kj::Promise<void>(kj::NEVER_DONE)
+          .attach(kj::defer([&lastRequestTaskCanceled]() { lastRequestTaskCanceled = true; })));
 
   request->abandonTasksForActorShutdown();
   request = nullptr;
-  KJ_EXPECT(lastRequestCanceled, "sole request's leftover waitUntil must be canceled");
+  KJ_EXPECT(lastRequestWaitUntilCanceled, "sole request's leftover waitUntil must be canceled");
+  KJ_EXPECT(lastRequestTaskCanceled, "sole request's leftover task must be canceled");
 
   auto first = fixture.newIncomingRequest(*context);
   auto second = fixture.newIncomingRequest(*context);
 
-  bool racingRequestCanceled = false;
-  auto paf = kj::newPromiseAndFulfiller<void>();
-  context->addWaitUntil(
-      paf.promise.attach(kj::defer([&racingRequestCanceled]() { racingRequestCanceled = true; })));
+  bool racingWaitUntilCanceled = false;
+  context->addWaitUntil(kj::Promise<void>(kj::NEVER_DONE)
+          .attach(kj::defer([&racingWaitUntilCanceled]() { racingWaitUntilCanceled = true; })));
+  bool racingTaskCanceled = false;
+  context->addTask(kj::Promise<void>(kj::NEVER_DONE)
+          .attach(kj::defer([&racingTaskCanceled]() { racingTaskCanceled = true; })));
 
   first->abandonTasksForActorShutdown();
   first = nullptr;
-  KJ_EXPECT(
-      !racingRequestCanceled, "must not cancel leftover work while another IncomingRequest is live");
+  KJ_EXPECT(racingWaitUntilCanceled,
+      "leftover waitUntil must be canceled even while another IncomingRequest is live");
+  KJ_EXPECT(racingTaskCanceled,
+      "leftover task must be canceled even while another IncomingRequest is live");
 
-  paf.fulfiller->fulfill();
   fixture.drainAndDestroy(kj::mv(second));
 }
 

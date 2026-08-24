@@ -369,28 +369,28 @@ IoContext::IncomingRequest::~IoContext_IncomingRequest() noexcept(false) {
 }
 
 void IoContext::IncomingRequest::abandonTasksForActorShutdown() {
-  // Cancel all pending background work now, while this request is still installed: once it is
-  // destroyed the IoContext has no current request, and any task that resumed in that state
-  // would fail on getCurrentIncomingRequest() before ever reaching JS -- for awaitIo
-  // continuations, noisily, via taskFailed(). Everything canceled here is work the imminent
-  // actor teardown would cancel moments later anyway (whether it was spawned by the
-  // teardown-sequence event's handler or left over from earlier events).
+  // Cancel all pending background work: the end of the teardown-sequence event means no more
+  // code may run in this actor, period. That includes work belonging to other, still-live
+  // IncomingRequests (an embedder may deliver the event to an actor that is still serving
+  // requests): those requests must not be allowed to finish, and the imminent teardown will
+  // reject them. Canceling here rather than leaving it to the teardown also closes the window
+  // between this event completing and the embedder's shutdown call, during which a stray timer
+  // or I/O completion could otherwise still resume JS.
   //
-  // This mirrors the destructor's aborted-context cleanup above, and must likewise run while
-  // this request is still installed (canceled work may have spans attached that access the
-  // current request's timer). It is safe to cancel from here for the same reason it is safe
-  // there: the caller (Worker::Actor::runPreShutdown()) is not itself a task in any of these
-  // sets, so this is not a self-cancellation.
+  // This must run while this request is still installed: canceled work may have spans attached
+  // that access the current request's timer (the destructor's aborted-context cleanup above
+  // runs before removal from `incomingRequests` for the same reason). It also ensures these
+  // sets are empty by the time this request is destroyed and the IoContext is potentially left
+  // with no current request at all -- a task resuming in that state would fail on
+  // getCurrentIncomingRequest() before ever reaching JS, noisily for awaitIo continuations
+  // (via taskFailed()).
   //
-  // If another IncomingRequest is live -- e.g. an embedder delivers the teardown-sequence event
-  // to an actor that is still serving requests -- then those requests' pending work must not be
-  // canceled out from under them, and the hazard this cancellation guards against doesn't exist
-  // either: the IoContext still has a current request once this one is destroyed.
-  if (context->incomingRequests.size() == 1) {
-    context->timeoutManager->cancelAll();
-    context->tasks.clear();
-    context->waitUntilTasks.clear();
-  }
+  // It is safe to cancel from here for the same reason it is safe in the destructor: the
+  // caller (Worker::Actor::runPreShutdown()) is not itself a task in any of these sets, so
+  // this is not a self-cancellation.
+  context->timeoutManager->cancelAll();
+  context->tasks.clear();
+  context->waitUntilTasks.clear();
   waitedForWaitUntil = true;
 }
 

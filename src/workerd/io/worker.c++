@@ -4487,11 +4487,11 @@ kj::Promise<EventOutcome> Worker::Actor::runPreShutdown(api::PreShutdownReason r
   // waits on onShutdown(), which only fires once our caller proceeds with the shutdown after this
   // method returns -- and the resulting background task would keep the IncomingRequest alive past
   // the actor's destruction, leaving IoContext::actor dangling in the IncomingRequest destructor.
-  // Instead, destroy the IncomingRequest synchronously, now, while the actor is still alive. Any
-  // background work the handler left behind (pending timers, tasks, waitUntil tasks) is canceled
-  // first: returning from the hook means "I'm done", the teardown that is about to happen would
-  // cancel it moments later anyway, and nothing may be left that could try to resume on the
-  // IoContext once it has no current request (see abandonTasksForActorShutdown()).
+  // Instead, destroy the IncomingRequest synchronously, now, while the actor is still alive. All
+  // pending background work (timers, tasks, waitUntil tasks) is canceled first: the end of the
+  // hook means no more code may run in this actor, and nothing may be left that could try to
+  // resume on the IoContext once it has no current request (see
+  // abandonTasksForActorShutdown()).
   incomingRequest->abandonTasksForActorShutdown();
   incomingRequest = nullptr;
 

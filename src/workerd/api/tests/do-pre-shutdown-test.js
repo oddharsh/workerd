@@ -100,6 +100,30 @@ export class AbortingHookObject extends DurableObject {
   }
 }
 
+// Leaves background work behind when the hook returns: a pending setTimeout() and a waitUntil().
+// Returning from the hook means no more code may run in this object, so neither may fire; the
+// runtime cancels them rather than letting them delay (or resume after) the teardown. The
+// callbacks record in module globals (test and object share an isolate) so the test can assert
+// they never ran.
+export class LeftoverWorkObject extends DurableObject {
+  async ping() {
+    return 'pong';
+  }
+
+  async preShutdown() {
+    globalThis.leftoverTimerRan = false;
+    globalThis.leftoverWaitUntilRan = false;
+    setTimeout(() => {
+      globalThis.leftoverTimerRan = true;
+    }, 100);
+    this.ctx.waitUntil(
+      scheduler.wait(100).then(() => {
+        globalThis.leftoverWaitUntilRan = true;
+      })
+    );
+  }
+}
+
 // Root/facet pair used to verify that only the root actor gets the hook (v1 excludes facets).
 // The hooks record that they ran in module-level globals, which the test can read because it
 // runs in the same isolate as the objects.
@@ -217,6 +241,19 @@ export default {
       const racingBump = stub.bump();
       await evictPromise;
       assert.strictEqual(await racingBump, 1);
+    }
+
+    // Background work the hook leaves behind (a pending setTimeout(), a waitUntil()) is
+    // canceled when the hook returns: the end of the hook means no more code runs in the
+    // object, so neither callback may ever fire.
+    {
+      const stub = env.LEFTOVER_WORK.get(env.LEFTOVER_WORK.idFromName('a'));
+      assert.strictEqual(await stub.ping(), 'pong');
+      await unsafe.evict(stub);
+      // Wait well past the leftover work's 100ms delay before asserting it never ran.
+      await scheduler.wait(500);
+      assert.strictEqual(globalThis.leftoverTimerRan, false);
+      assert.strictEqual(globalThis.leftoverWaitUntilRan, false);
     }
 
     // A worker without the compat flag: handler present but never invoked.
