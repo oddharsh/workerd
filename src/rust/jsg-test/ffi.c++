@@ -74,17 +74,12 @@ void EvalContext::set_global(::rust::Str name, ::workerd::rust::jsg::Local value
   ::workerd::jsg::check(ctx->Global()->Set(ctx, key, v8Value));
 }
 
-EvalResult EvalContext::eval(::rust::Str code) const {
+namespace {
+EvalResult runScript(
+    v8::Isolate* v8Isolate, v8::Local<v8::Context> ctx, v8::Local<v8::Script> script) {
   EvalResult result;
   result.success = false;
 
-  v8::Local<v8::Context> ctx = v8Context.Get(v8Isolate);
-
-  v8::Local<v8::String> source = ::workerd::jsg::check(v8::String::NewFromUtf8(
-      v8Isolate, code.data(), v8::NewStringType::kNormal, static_cast<int>(code.size())));
-
-  v8::Local<v8::Script> script;
-  KJ_ASSERT(v8::Script::Compile(ctx, source).ToLocal(&script), "Failed to compile script");
   v8::TryCatch catcher(v8Isolate);
 
   v8::Local<v8::Value> value;
@@ -100,6 +95,40 @@ EvalResult EvalContext::eval(::rust::Str code) const {
   }
 
   return result;
+}
+}  // namespace
+
+EvalResult EvalContext::eval(::rust::Str code) const {
+  v8::Local<v8::Context> ctx = v8Context.Get(v8Isolate);
+
+  v8::Local<v8::String> source = ::workerd::jsg::check(v8::String::NewFromUtf8(
+      v8Isolate, code.data(), v8::NewStringType::kNormal, static_cast<int>(code.size())));
+
+  v8::Local<v8::Script> script;
+  KJ_ASSERT(v8::Script::Compile(ctx, source).ToLocal(&script), "Failed to compile script");
+
+  return runScript(v8Isolate, ctx, script);
+}
+
+EvalResult EvalContext::eval_named(::rust::Str code, ::rust::Str resource_name) const {
+  v8::Local<v8::Context> ctx = v8Context.Get(v8Isolate);
+
+  v8::Local<v8::String> source = ::workerd::jsg::check(v8::String::NewFromUtf8(
+      v8Isolate, code.data(), v8::NewStringType::kNormal, static_cast<int>(code.size())));
+
+  // Attach a ScriptOrigin so the compiled script (and thus profiler nodes / stack traces) report
+  // `resource_name` as their script resource name — required for source-map lookups keyed by the
+  // generated file name.
+  v8::Local<v8::String> resourceName = ::workerd::jsg::check(v8::String::NewFromUtf8(v8Isolate,
+      resource_name.data(), v8::NewStringType::kNormal, static_cast<int>(resource_name.size())));
+  v8::ScriptOrigin origin(resourceName);
+  v8::ScriptCompiler::Source scriptSource(source, origin);
+
+  v8::Local<v8::Script> script;
+  KJ_ASSERT(
+      v8::ScriptCompiler::Compile(ctx, &scriptSource).ToLocal(&script), "Failed to compile script");
+
+  return runScript(v8Isolate, ctx, script);
 }
 
 void TestHarness::run_in_context(

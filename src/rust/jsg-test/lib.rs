@@ -46,6 +46,11 @@ mod ffi {
         );
 
         pub unsafe fn eval(self: &EvalContext, code: &str) -> EvalResult;
+        pub unsafe fn eval_named(
+            self: &EvalContext,
+            code: &str,
+            resource_name: &str,
+        ) -> EvalResult;
         pub unsafe fn set_global(self: &EvalContext, name: &str, value: Local);
 
         /// Triggers garbage collection for testing purposes.
@@ -138,6 +143,25 @@ impl EvalContext<'_> {
     pub fn eval_raw(&self, code: &str) -> Result<v8::Local<'_, v8::Value>, EvalError<'_>> {
         // SAFETY: self.inner is a valid EvalContext from C++; code is a valid str.
         let result = unsafe { self.inner.eval(code) };
+        self.raw_result(result)
+    }
+
+    /// Like [`EvalContext::eval_raw`], but compiles the code with a `ScriptOrigin` whose resource
+    /// name is `resource_name`.
+    pub fn eval_raw_named(
+        &self,
+        code: &str,
+        resource_name: &str,
+    ) -> Result<v8::Local<'_, v8::Value>, EvalError<'_>> {
+        // SAFETY: self.inner is a valid EvalContext from C++; code and resource_name are valid strs.
+        let result = unsafe { self.inner.eval_named(code, resource_name) };
+        self.raw_result(result)
+    }
+
+    fn raw_result(
+        &self,
+        result: ffi::EvalResult,
+    ) -> Result<v8::Local<'_, v8::Value>, EvalError<'_>> {
         let opt_local: Option<v8::ffi::Local> = result.value.into();
 
         if result.success {
